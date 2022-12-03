@@ -9,17 +9,17 @@ class ClassBuilder:
         self.clazz = clazz
         self.allow_overlap_mapping = allow_overlap_mapping
 
-    def add(self, mapping: str, handler_method: Callable[..., tuple[int, ByteString, dict]]) -> 'ClassBuilder':
+    def add(self, mapping: str, handler: Callable) -> 'ClassBuilder':
         if (not self.allow_overlap_mapping) and mapping in self.methods.keys():
             raise ClassBuilderOverlapException(f'Name {mapping} already added')
-        self.methods[mapping] = handler_method
+        self.methods[mapping] = handler
         return self
 
-    def build(self, update: dict = None):
-        if update is None:
-            update = {}
-        assert len(update.keys() & self.methods.keys()) == 0, "Bad things, if params and rewritten __dict__ overlaps"
-        t = type('SomeHandler', (self.clazz,), dict(self.clazz.__dict__) | update | self.methods)
+    def with_constructor(self, method: Callable) -> 'ClassBuilder':
+        return self.add("__init__", method)
+
+    def build(self):
+        t = type('SomeClass', (self.clazz,), dict(self.clazz.__dict__) | self.methods)
         return t
 
 
@@ -28,11 +28,15 @@ class HandlerBuilder(ClassBuilder):
         assert issubclass(http_handler_subclass, HTTPHandler)
         super().__init__(http_handler_subclass, allow_overlap_mapping)
 
+    def add(self, mapping: str, handler_method: Callable[..., tuple[int, ByteString, dict]]) -> 'ClassBuilder':
+        return super().add(mapping, handler_method)
+
     def build(self, with_root: str = None, apache_mode: str = None):
         def constructor_with_root_path(self, request, client_address, server):
-            self.__class__.__base__.__init__(self, request, client_address, server, directory=with_root)
+            self.__class__.__base__.__init__(self, request, client_address, server, directory=with_root, apache_mode=apache_mode)
 
-        t = super().build(None if with_root is None else {"__init__": constructor_with_root_path, 'apache_mode': apache_mode})
+        super().with_constructor(constructor_with_root_path)
+        t = super().build()
         t.__dict__['handlers'].update(self.methods)
         return t
 
@@ -40,4 +44,3 @@ class HandlerBuilder(ClassBuilder):
 class ClassBuilderOverlapException(Exception):
     def __init__(self, msg):
         super(ClassBuilderOverlapException, self).__init__(msg)
-
