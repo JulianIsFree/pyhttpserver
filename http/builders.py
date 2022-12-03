@@ -33,12 +33,18 @@ class HandlerBuilder(ClassBuilder):
 
     def build(self, with_root: str = None, apache_mode: str = None):
         def constructor_with_root_path(self, request, client_address, server):
-            self.__class__.__base__.__init__(self, request, client_address, server, directory=with_root, apache_mode=apache_mode)
+            self.__class__.__base__.__init__(self, request, client_address, server, directory=with_root,
+                                             apache_mode=apache_mode)
 
         super().with_constructor(constructor_with_root_path)
         t = super().build()
         t.__dict__['handlers'].update(self.methods)
         return t
+
+    def request(self, name):
+        def with_name(handler_method: Callable[..., tuple[int, ByteString, dict]]):
+            self.add(name, handler_method)
+        return with_name
 
 
 class ClassBuilderOverlapException(Exception):
