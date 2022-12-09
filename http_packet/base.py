@@ -3,11 +3,19 @@ import http.server
 from typing import Tuple, Callable
 
 
+class HTTPType(enum.Enum):
+    OTHER = 0
+    POST = 1
+    GET = 2
+
+
 class RequestDescriptor:
-    def __init__(self, name: str, qd: dict[str, Callable[[str], any]], func: Callable[[...], Tuple[int, dict, str]]):
+    def __init__(self, tpe: HTTPType, name: str, qd: dict[str, Callable[[str], any]],
+                 func: Callable[[...], Tuple[int, dict, str]]):
         self.name = name
         self.query_descriptor = qd
         self.func = func
+        self.tpe = tpe
 
     @property
     def qd(self):
@@ -17,26 +25,35 @@ class RequestDescriptor:
 class RequestCollection:
     def __init__(self):
         self.getters: dict[str, RequestDescriptor] = {}
+        self.posters: dict[str, RequestDescriptor] = {}
 
-    def add_get(self, name: str, qd: dict[str, Callable[[str], any]], func: Callable[[...], Tuple[int, dict, str]]):
-        self._check_handler_name(name)
-        self.getters[name] = RequestDescriptor(name, qd, func)
+    def add(self, tpe: HTTPType, name: str, qd: dict[str, Callable[[str], any]],
+            func: Callable[[...], Tuple[int, dict, str]]):
+        self._check_handler_name(tpe, name)
+        self._requests_by_type(tpe)[name] = RequestDescriptor(HTTPType.GET, name, qd, func)
 
-    def _check_handler_name(self, name):
-        check = next((item for item in self.getters.keys() if name.find(item) != 0), None)
+    def _check_handler_name(self, tpe: HTTPType, name):
+        check = next((item for item in self._requests_by_type(tpe).keys() if name.find(item) == 0), None)
         assert check is None, f'Can\'t add request {name}, already exists: {check}'
 
-    def __getitem__(self, item):
-        return self.getters[item]
+    def __getitem__(self, tpe: HTTPType):
+        return self._requests_by_type(tpe)
 
-    def keys_get(self):
-        return self.getters.keys()
+    def _requests_by_type(self, tpe: HTTPType):
+        if tpe == HTTPType.GET:
+            return self.getters
+        if tpe == HTTPType.POST:
+            return self.posters
+        raise Exception("Request handler not found: " + str(tpe))
 
-    def values_get(self):
-        return self.getters.values()
+    def keys(self, tpe: HTTPType):
+        return self._requests_by_type(tpe).keys()
 
-    def items_get(self):
-        return self.getters.items()
+    def values(self, tpe: HTTPType):
+        return self._requests_by_type(tpe).values()
+
+    def items_get(self, tpe: HTTPType):
+        return self._requests_by_type(tpe).items()
 
 
 class HTTPHandler(http.server.BaseHTTPRequestHandler):
@@ -50,15 +67,15 @@ class HTTPHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        path, qd = self.parse_path()
-        if path not in self.request_collection.keys_get():
+        path, query = self.parse_path()
+        if path not in self.request_collection.keys(HTTPType.GET):
             self.send_fast_response(http.HTTPStatus.NOT_FOUND)
             return
 
-        rq = self.request_collection[path]
-        for key, value in qd.items():
-            qd[key] = rq.qd[key](value)
-        code, headers, result = rq.func(**qd)
+        rq = self.request_collection[HTTPType.GET][path]
+        for key, value in query.items():
+            query[key] = rq.qd[key](value)
+        code, headers, result = rq.func(**query, infile=self.rfile)
         self.send_response(code)
         for name, value in headers.items():
             self.send_header(name, value)
@@ -79,25 +96,22 @@ class HTTPHandler(http.server.BaseHTTPRequestHandler):
             qd[name] = value
         return path, qd
 
-    def add_get(self, name, descriptor: dict[str, Callable[[str], any]], func: Callable[[...], Tuple[int, dict, str]]):
-        self.request_collection.add_get(name, descriptor, func)
-
-
-class HTTPType(enum.Enum):
-    GET = 0
-    OTHER = 1
-
 
 class HTTPRequestBuilder:
     handlers = RequestCollection()
 
     def add(self, tpe: HTTPType, name, qd: dict[str, Callable[[str], any]], func):
-        if tpe == HTTPType.GET:
-            self.handlers.add_get(name, qd, func)
+        self.handlers.add(tpe, name, qd, func)
 
-    def getter(self, name: str, qd: dict[str, Callable[[str], any]]):
+    def get(self, name: str, qd: dict[str, Callable[[str], any]]):
         def inner(func):
             self.add(HTTPType.GET, name, qd, func)
+
+        return inner
+
+    def post(self, name: str, qd: dict[str, Callable[[str], any]]):
+        def inner(func):
+            self.add(HTTPType.POST, name, qd, func)
 
         return inner
 
@@ -109,7 +123,7 @@ if __name__ == "__main__":
     builder = HTTPRequestBuilder()
 
 
-    @builder.getter(name="/ping", qd={'val': int})
+    @builder.get(name="/ping", qd={'val': int})
     def ping(val=1, **kwargs):
         res = ''
         for i in range(val):
@@ -118,6 +132,21 @@ if __name__ == "__main__":
         return 200, {}, res
 
 
-    print(builder.handlers.getters)
+    @builder.get(name="/pong", qd={'val': int})
+    def pong(val=1, **kwargs):
+        res = ''
+        for i in range(val):
+            res += 'ping'
+
+        return 200, {}, res
+
+
+    @builder.post(name="/remember", qd={})
+    def remember(**kwargs):
+        infile = kwargs['rfile']
+        print(infile.read())
+
+
+    # print(builder.handlers.getters)
     server = http.server.HTTPServer(('localhost', 8080), builder.build())
     server.serve_forever()
