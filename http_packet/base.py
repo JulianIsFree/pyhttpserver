@@ -24,8 +24,7 @@ class RequestDescriptor:
 
 class RequestCollection:
     def __init__(self):
-        self.getters: dict[str, RequestDescriptor] = {}
-        self.posters: dict[str, RequestDescriptor] = {}
+        self.handlers: dict[HTTPType, dict[str, RequestDescriptor]] = {}
 
     def add(self, tpe: HTTPType, name: str, qd: dict[str, Callable[[str], any]],
             func: Callable[[...], Tuple[int, dict, str]]):
@@ -40,11 +39,9 @@ class RequestCollection:
         return self._requests_by_type(tpe)
 
     def _requests_by_type(self, tpe: HTTPType):
-        if tpe == HTTPType.GET:
-            return self.getters
-        if tpe == HTTPType.POST:
-            return self.posters
-        raise Exception("Request handler not found: " + str(tpe))
+        if tpe not in self.handlers.keys():
+            self.handlers[tpe] = {}
+        return self.handlers[tpe]
 
     def keys(self, tpe: HTTPType):
         return self._requests_by_type(tpe).keys()
@@ -66,21 +63,28 @@ class HTTPHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(code)
         self.end_headers()
 
-    def do_GET(self):
+    def proceed_default(self, tpe: HTTPType):
         path, query = self.parse_path()
-        if path not in self.request_collection.keys(HTTPType.GET):
+        if path not in self.request_collection.keys(tpe):
             self.send_fast_response(http.HTTPStatus.NOT_FOUND)
             return
 
-        rq = self.request_collection[HTTPType.GET][path]
+        request_collection = self.request_collection[tpe][path]
         for key, value in query.items():
-            query[key] = rq.qd[key](value)
-        code, headers, result = rq.func(**query, infile=self.rfile)
+            if key in request_collection.qd.keys():
+                query[key] = request_collection.qd[key](value)
+        code, headers, result = request_collection.func(**query, infile=self.rfile, headers=self.headers)
         self.send_response(code)
         for name, value in headers.items():
             self.send_header(name, value)
         self.end_headers()
         self.wfile.write(result.encode('utf-8'))
+
+    def do_GET(self):
+        self.proceed_default(HTTPType.GET)
+
+    def do_POST(self):
+        self.proceed_default(HTTPType.POST)
 
     def parse_path(self):
         tmp = self.path.split("?")
@@ -103,13 +107,13 @@ class HTTPRequestBuilder:
     def add(self, tpe: HTTPType, name, qd: dict[str, Callable[[str], any]], func):
         self.handlers.add(tpe, name, qd, func)
 
-    def get(self, name: str, qd: dict[str, Callable[[str], any]]):
+    def get(self, name: str, **qd):
         def inner(func):
             self.add(HTTPType.GET, name, qd, func)
 
         return inner
 
-    def post(self, name: str, qd: dict[str, Callable[[str], any]]):
+    def post(self, name: str, **qd):
         def inner(func):
             self.add(HTTPType.POST, name, qd, func)
 
@@ -123,7 +127,7 @@ if __name__ == "__main__":
     builder = HTTPRequestBuilder()
 
 
-    @builder.get(name="/ping", qd={'val': int})
+    @builder.get(name="/ping", val=int)
     def ping(val=1, **kwargs):
         res = ''
         for i in range(val):
@@ -132,7 +136,7 @@ if __name__ == "__main__":
         return 200, {}, res
 
 
-    @builder.get(name="/pong", qd={'val': int})
+    @builder.get(name="/pong", val=int)
     def pong(val=1, **kwargs):
         res = ''
         for i in range(val):
@@ -141,10 +145,13 @@ if __name__ == "__main__":
         return 200, {}, res
 
 
-    @builder.post(name="/remember", qd={})
+    @builder.post(name="/remember")
     def remember(**kwargs):
-        infile = kwargs['rfile']
-        print(infile.read())
+        infile = kwargs['infile']
+        headers = kwargs['headers']
+        len = int(headers['Content-Length'])
+        print(infile.read(len).decode('utf-8'))
+        return 200, {}, ""
 
 
     # print(builder.handlers.getters)
